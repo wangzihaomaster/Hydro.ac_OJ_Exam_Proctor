@@ -1,10 +1,20 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Hydro OJ 监考系统 —— 入口。
+"""Hydro OJ 监考系统 —— 零依赖启动脚本。
 
-用法：
-    python main.py                 # 图形界面（推荐）
-    python main.py --cli ...       # 命令行/无图形环境模式
+直接双击运行（Windows 上可另存为 启动.bat：
+    @echo off
+    start "" pythonw main.py
+或
+    python main.py
+）：
+
+- 不需要安装任何第三方 Python 包；只要电脑装有 Python 3.7+
+  （tkinter 随官方安装包自带）即可打开图形界面。
+- 录屏、进程监控、Firefox/Edge/Chrome URL 读取全部自动探测环境，
+  缺什么库就降级到什么方式，并在报告中如实注明。
+- 可选增强（不装也能跑）：
+    pip install psutil mss opencv-python numpy lz4 pywin32
+    以及系统级 ffmpeg（强烈推荐，用于高质量 mp4 录像）。
 """
 
 import argparse
@@ -36,14 +46,21 @@ def main():
                     help="发现禁用软件直接强制关闭，不询问")
     ns = ap.parse_args()
 
-    if ns.cli or os.environ.get("DISPLAY", "") == "" and \
-            sys.platform not in ("win32", "darwin"):
+    if ns.cli or (os.environ.get("DISPLAY", "") == "" and
+                  sys.platform not in ("win32", "darwin")):
         if not (ns.domain and ns.cid):
             ns.domain = input("请输入域(domain): ").strip()
             ns.cid = input("请输入比赛ID(contest id): ").strip()
         run_cli(ns)
     else:
-        run_gui()
+        try:
+            run_gui()
+        except Exception as e:  # 无 tkinter 的 Linux 发行版等
+            print("[warn] 图形界面不可用(%s)，切换到命令行模式。" % e)
+            if not (ns.domain and ns.cid):
+                ns.domain = input("请输入域(domain): ").strip()
+                ns.cid = input("请输入比赛ID(contest id): ").strip()
+            run_cli(ns)
 
 
 if __name__ == "__main__":

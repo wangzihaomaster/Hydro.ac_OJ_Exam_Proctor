@@ -2,8 +2,11 @@
 """全程录屏模块。
 
 优先使用 ffmpeg gdigrab（Windows，音画同步的 mp4）；
-无 ffmpeg 时用 mss + OpenCV 逐帧截图合成 mp4，并同时保存 JPEG 帧序列，
-保证任何环境下都有可用的录像证据。
+无 ffmpeg 时：
+  - 装有 mss + OpenCV + numpy 则逐帧截图合成 mp4 + JPEG 帧序列；
+  - 纯标准库环境（零依赖直接运行）自动降级为 PIL 抓屏 /
+    screencap(sct) / import(ImageMagick) 定时截 PNG 帧序列，
+    保证任何环境下都有可用的录像证据。
 """
 
 import glob
@@ -14,10 +17,6 @@ import sys
 import threading
 import time
 
-import cv2
-import mss
-import numpy as np
-
 from . import config
 
 IS_WIN = sys.platform.startswith("win")
@@ -25,6 +24,34 @@ IS_WIN = sys.platform.startswith("win")
 
 def has_ffmpeg():
     return shutil.which("ffmpeg") is not None
+
+
+try:  # 可选第三方抓屏/编码依赖
+    import cv2
+    import mss
+    import numpy as np
+    HAS_MSS_CV2 = True
+except ImportError:
+    HAS_MSS_CV2 = False
+
+
+def _probe_png_backend():
+    """探测零依赖可用的截屏方式，返回 (名称, 命令前缀)。"""
+    try:
+        from PIL import ImageGrab  # noqa: F401
+        return ("pillow", None)
+    except ImportError:
+        pass
+    if not IS_WIN:
+        if shutil.which("scrot"):
+            return ("scrot", ["scrot"])
+        if shutil.which("screencap"):          # Android/Termux
+            return ("screencap", ["screencap", "-p"])
+        if shutil.which("import"):             # ImageMagick
+            return ("import", ["import", "-window", "root"])
+        if shutil.which("gnome-screenshot"):
+            return ("gnome-screenshot", ["gnome-screenshot", "-f"])
+    return ("none", None)
 
 
 def _screen_size_x11(display):
@@ -81,10 +108,30 @@ class ScreenRecorder:
                 self.error = "ffmpeg 启动失败: %s" % e
                 print("[recorder] ffmpeg failed:", e, flush=True)
         if self.method != "ffmpeg":
-            self.method = "mss+opencv"
-            self._thread = threading.Thread(target=self._mss_loop,
-                                            daemon=True)
-            self._thread.start()
+            if HAS_MSS_CV2:
+                self.method = "mss+opencv"
+                self._thread = threading.Thread(target=self._mss_loop,
+                                                daemon=True)
+                self._thread.start()
+            else:
+                name, cmd = _probe_png_backend()
+                if name == "pillow":
+                    self.method = "pillow-frames"
+                    self._thread = threading.Thread(target=self._pillow_loop,
+                                                    daemon=True)
+                    self._thread.start()
+                elif name != "none":
+                    self.method = "%s-frames" % name
+                    self._png_cmd = cmd
+                    self._thread = threading.Thread(target=self._cmd_loop,
+                                                    daemon=True)
+                    self._thread.start()
+                else:
+                    self.method = "none"
+                    self.error = ("无可用录屏方式：请安装 ffmpeg（推荐）或"
+                                  " pip install mss opencv-python numpy")
+                    print("[recorder] no capture backend available",
+                          flush=True)
 
     def _start_ffmpeg(self):
         backend = self._pick_backend()
@@ -114,6 +161,67 @@ class ScreenRecorder:
             raise RuntimeError("无法获取 X11 屏幕尺寸(xrandr)")
         return ("x11grab", ["-f", "x11grab", "-video_size",
                             "%dx%d" % size, "-framerate", fps, "-i", disp])
+
+    # ------------------------------------------------------------------
+    def _pillow_loop(self):
+        """零依赖兜底：Pillow ImageGrab 定时截 PNG 帧序列。"""
+        from PIL import ImageGrab
+        interval = 1.0 / self.fps
+        idx = 0
+        while not self._stop.is_set():
+            t0 = time.time()
+            try:
+                img = ImageGrab.grab(all_screens=True)
+                idx += 1
+                img.save(os.path.join(self.frames_dir,
+                                      "frame_%06d.png" % idx),
+                         optimize=False, compress_level=3)
+                self.frame_count = idx
+            except Exception as e:
+                self.error = "PIL 抓屏失败: %s" % e
+                return
+            dt = time.time() - t0
+            self._stop.wait(max(0.05, interval - dt))
+
+    def _cmd_loop(self):
+        """零依赖兜底：调用外部截图命令生成 PNG 帧序列。"""
+        interval = 1.0 / self.fps
+        idx = 0
+        while not self._stop.is_set():
+            t0 = time.time()
+            path = os.path.join(self.frames_dir, "frame_%06d.png" % (idx + 1))
+            tmp = os.path.join(self.frames_dir, "_cap_tmp.png")
+            cmd = list(self._png_cmd)
+            if cmd[0] in ("scrot", "gnome-screenshot"):
+                cmd.append(tmp)
+            elif cmd[0] == "import":
+                cmd.append(tmp)
+            elif cmd[0] == "screencap":
+                cmd.append(tmp)
+            try:
+                r = subprocess.run(cmd, timeout=10,
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+                src = tmp if os.path.exists(tmp) else None
+                if src is None and cmd[0] == "scrot" and r.returncode == 0:
+                    # scrot 无输出参数时会在 cwd 生成随机名文件
+                    cands = sorted(glob.glob(os.path.join(
+                        self.frames_dir, "*.png")),
+                        key=os.path.getmtime)
+                    cands = [c for c in cands if "frame_" not in
+                             os.path.basename(c)]
+                    if cands:
+                        src = cands[-1]
+                if src:
+                    if src != path:
+                        shutil.move(src, path)
+                    idx += 1
+                    self.frame_count = idx
+            except Exception as e:
+                self.error = "截图命令失败: %s" % e
+                return
+            dt = time.time() - t0
+            self._stop.wait(max(0.05, interval - dt))
 
     # ------------------------------------------------------------------
     def _mss_loop(self):
@@ -163,7 +271,10 @@ class ScreenRecorder:
         self.stopped_at = time.time()
         # ffmpeg 方式下也补一份帧序列（可选，抽帧）
         if self.method == "ffmpeg" and os.path.exists(self.video_path):
-            self._extract_frames_backup()
+            if HAS_MSS_CV2:
+                self._extract_frames_backup()
+            else:
+                self._ffmpeg_extract_frames()
         return self.video_path
 
     def _extract_frames_backup(self):
@@ -185,12 +296,29 @@ class ScreenRecorder:
         cap.release()
         self.frame_count = idx
 
+    def _ffmpeg_extract_frames(self):
+        """无 opencv 时，用 ffmpeg 把 mp4 抽帧成 jpg 序列。"""
+        try:
+            subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                 "-i", self.video_path,
+                 "-vf", "fps=%g" % max(0.2, self.fps),
+                 "-q:v", str(max(2, config.JPEG_QUALITY // 5)),
+                 os.path.join(self.frames_dir, "frame_%06d.jpg")],
+                timeout=600, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL)
+            self.frame_count = len(glob.glob(
+                os.path.join(self.frames_dir, "*.jpg")))
+        except Exception as e:
+            self.error = "ffmpeg 抽帧失败: %s" % e
+
     # ------------------------------------------------------------------
     def zip_frames(self):
-        """把 JPEG 帧序列打包为 frames.zip，返回路径。"""
+        """把帧序列打包为 frames.zip，返回路径。"""
         import zipfile
         zp = os.path.join(self.out_dir, config.FRAMES_ZIP)
-        files = sorted(glob.glob(os.path.join(self.frames_dir, "*.jpg")))
+        files = sorted(glob.glob(os.path.join(self.frames_dir, "*.jpg")) +
+                       glob.glob(os.path.join(self.frames_dir, "*.png")))
         with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in files:
                 zf.write(f, os.path.basename(f))

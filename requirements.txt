@@ -1,5 +1,13 @@
-psutil>=5.9
-mss>=6.1
-opencv-python>=4.5
-numpy>=1.21
-lz4>=4.0  # 可选：解析 Firefox sessionstore.jsonlz4（无则自动降级为正则扫描）
+# =====================================================================
+# 本软件可【零依赖直接运行】：python main.py（或双击 启动.bat）
+# 以下全部为可选增强，不安装也能正常工作（自动降级），按需选装：
+# =====================================================================
+
+# —— 录屏（推荐优先安装系统级 ffmpeg，见 README；以下是无 ffmpeg 时的备选）——
+psutil>=5.9            # 进程监控更快更准（不装则自动用 Win32 API / /proc）
+mss>=6.1               # 无 ffmpeg 时的跨平台抓屏方式
+opencv-python>=4.5     # 无 ffmpeg 时合成 mp4 录像
+numpy>=1.21            # mss + opencv 配套
+lz4>=4.0               # Firefox sessionstore.jsonlz4 快速解压
+                       # （不装则用内置纯 Python LZ4 解码器，功能不受影响）
+pywin32>=305           # Windows 前台窗口检测增强（不装则用 ctypes 实现）

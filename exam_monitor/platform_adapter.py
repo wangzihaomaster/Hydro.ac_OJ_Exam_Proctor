@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
@@ -152,8 +153,7 @@ def _x11_list_windows():
 # 进程枚举 / 强制关闭
 # --------------------------------------------------------------------------
 
-def iter_processes():
-    """生成 (pid, name) 。"""
+def _iter_processes_psutil():
     import psutil
     for p in psutil.process_iter(["pid", "name"]):
         try:
@@ -162,16 +162,145 @@ def iter_processes():
             continue
 
 
+def _proc_name_win32(pid):
+    """用 ctypes PSAPI QueryFullProcessImageNameW 取进程名。"""
+    import ctypes
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    h = ctypes.windll.kernel32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return None
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = ctypes.c_ulong(1024)
+        if ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                h, 0, buf, ctypes.byref(size)):
+            return os.path.basename(buf.value)
+        return None
+    finally:
+        ctypes.windll.kernel32.CloseHandle(h)
+
+
+def _iter_processes_win32():
+    import ctypes
+    TH32CS_SNAPPROCESS = 0x00000002
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_uint32),
+            ("cntUsage", ctypes.c_uint32),
+            ("th32ProcessID", ctypes.c_uint32),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", ctypes.c_uint32),
+            ("cntThreads", ctypes.c_uint32),
+            ("th32ParentProcessID", ctypes.c_uint32),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_uint32),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    snap = ctypes.windll.kernel32.CreateToolhelp32Snapshot(
+        TH32CS_SNAPPROCESS, 0)
+    if snap == -1 or snap == 0xFFFFFFFFFFFFFFFF:
+        return
+    try:
+        pe = PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        ok = ctypes.windll.kernel32.Process32FirstW(snap, ctypes.byref(pe))
+        while ok:
+            yield int(pe.th32ProcessID), pe.szExeFile.lower()
+            ok = ctypes.windll.kernel32.Process32NextW(snap, ctypes.byref(pe))
+    finally:
+        ctypes.windll.kernel32.CloseHandle(snap)
+
+
+def _iter_processes_posix():
+    """读 /proc（Linux）；macOS 或无 /proc 时用 ps 命令兜底。"""
+    if os.path.isdir("/proc"):
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            name = None
+            try:
+                with open("/proc/%d/comm" % pid, "r") as f:
+                    name = f.read().strip()
+            except Exception:
+                pass
+            if not name:
+                try:
+                    exe = os.readlink("/proc/%d/exe" % pid)
+                    name = os.path.basename(exe)
+                except Exception:
+                    continue
+            yield pid, name.lower()
+        return
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,comm="],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return
+    for line in out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            yield int(parts[0]), \
+                os.path.basename(parts[1].strip()).lower()
+
+
+def iter_processes():
+    """生成 (pid, name)。优先 psutil，缺失时自动降级为系统原生方式。"""
+    try:
+        import psutil  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        yield from _iter_processes_psutil()
+        return
+    if IS_WIN:
+        yield from _iter_processes_win32()
+    else:
+        yield from _iter_processes_posix()
+
+
 def kill_process(pid, grace=1.0):
     """强制结束进程，返回 True/False。"""
-    import psutil
     try:
+        import psutil
         p = psutil.Process(pid)
         p.terminate()
         try:
             p.wait(timeout=grace)
         except psutil.TimeoutExpired:
             p.kill()
+        return True
+    except ImportError:
+        return _kill_process_native(pid, grace)
+    except Exception:
+        return False
+
+
+def _kill_process_native(pid, grace):
+    import signal
+    try:
+        if IS_WIN:
+            import ctypes
+            PROCESS_TERMINATE = 0x0001
+            h = ctypes.windll.kernel32.OpenProcess(
+                PROCESS_TERMINATE, False, pid)
+            if not h:
+                return False
+            ok = bool(ctypes.windll.kernel32.TerminateProcess(h, 0))
+            ctypes.windll.kernel32.CloseHandle(h)
+            return ok
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.time() + grace
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return True
+            time.sleep(0.1)
+        os.kill(pid, signal.SIGKILL)
         return True
     except Exception:
         return False
@@ -317,6 +446,47 @@ def _read_sessionstore_urls(pd):
     """
     import json
 
+    def _lz4_block_decompress(src, expected_size=None):
+        """纯标准库实现的 LZ4 block 解压器（无 lz4 包时的兜底）。"""
+        out = bytearray()
+        i = 0
+        n = len(src)
+        limit = expected_size if expected_size else float("inf")
+        while i < n and len(out) < limit:
+            token = src[i]
+            i += 1
+            lit = token >> 4
+            if lit == 15:
+                while True:
+                    b = src[i]
+                    i += 1
+                    lit += b
+                    if b != 255:
+                        break
+            out += src[i:i + lit]
+            i += lit
+            if i >= n:
+                break  # 以 literal 结尾的块
+            off = int.from_bytes(src[i:i + 2], "little")
+            i += 2
+            if off == 0:
+                raise ValueError("bad lz4 offset")
+            length = token & 0x0F
+            if length == 15:
+                while True:
+                    b = src[i]
+                    i += 1
+                    length += b
+                    if b != 255:
+                        break
+            length += 4
+            start = len(out) - off
+            if start < 0:
+                raise ValueError("lz4 match out of range")
+            for k in range(length):
+                out.append(out[start + k])
+        return bytes(out[:limit] if limit != float("inf") else out)
+
     def _decompress_jsonlz4(path):
         """Mozilla LZ4 帧格式：'LZ4'+描述符(1)+保留(4)=8 字节头，
         之后是 lz4.block 数据（首 4 字节小端为原始长度）。"""
@@ -325,19 +495,32 @@ def _read_sessionstore_urls(pd):
         if not data.startswith(b"LZ4"):
             return None
         body = data[8:]
+        raw_len = int.from_bytes(body[:4], "little") \
+            if len(body) >= 4 else None
+        # 1) 优先用 python-lz4（快）
         try:
             import lz4.block
-            dec = None
             try:
-                # 优先按"内嵌长度"模式整体解压
                 dec = lz4.block.decompress(body)
             except Exception:
-                raw_len = int.from_bytes(body[:4], "little")
                 dec = lz4.block.decompress(body[4:],
-                                           uncompressed_size=raw_len)
+                                           uncompressed_size=raw_len or
+                                           64 * 1024 * 1024)
             return json.loads(dec.decode("utf-8", "replace"))
+        except ImportError:
+            pass
         except Exception:
             return None
+        # 2) 零依赖：内置纯 Python LZ4 block 解码
+        try:
+            dec = _lz4_block_decompress(body[4:], raw_len)
+            return json.loads(dec.decode("utf-8", "replace"))
+        except Exception:
+            try:
+                dec = _lz4_block_decompress(body)
+                return json.loads(dec.decode("utf-8", "replace"))
+            except Exception:
+                return None
 
     def _urls_from_obj(obj):
         urls = []
