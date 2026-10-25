@@ -1,0 +1,5 @@
+psutil>=5.9
+mss>=6.1
+opencv-python>=4.5
+numpy>=1.21
+lz4>=4.0  # 可选：解析 Firefox sessionstore.jsonlz4（无则自动降级为正则扫描）

@@ -224,23 +224,27 @@ class MonitorApp:
             self._add_row(ev)
 
     def _launch_browser(self):
-        """优先以 --app 模式启动 Chrome/Edge（无地址栏、窗口受限），
+        """优先以受限模式启动 Chrome/Edge/Firefox（尽量只显示比赛页面），
         失败则退回系统默认浏览器。"""
         launched = False
+        d, c = self.domain, self.cid
         for exe in ("chrome", "msedge", "google-chrome", "chromium",
-                    "chromium-browser"):
+                    "chromium-browser", "microsoft-edge", "firefox"):
             path = shutil_which(exe) or shutil_which(exe + ".exe")
             if not path:
                 continue
+            args = self._kiosk_args(exe, path, d, c)
+            if args is None:
+                continue
             try:
-                self._browser_proc = subprocess.Popen([
-                    path, "--app=%s" % self.contest_url,
-                    "--new-window", "--start-maximized",
-                    "--disable-session-crashed-bubble",
-                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self._browser_proc = subprocess.Popen(
+                    args, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL)
                 launched = True
+                mode = {"firefox": "--kiosk（全屏锁定比赛页）"}.get(
+                    exe, "--app 模式（无地址栏）")
                 self.log.record("browser_launch",
-                                "以 --app 模式启动 %s（仅显示比赛页面）" % exe,
+                                "已启动 %s %s，仅显示比赛页面" % (exe, mode),
                                 {"exe": path})
                 break
             except OSError:
@@ -251,6 +255,54 @@ class MonitorApp:
                             "已通过系统默认浏览器打开比赛页面")
             self.log.warning("当前浏览器无法自动读取标签页 URL，"
                              "越界访问依赖录屏人工核查（详见 README 限制说明）")
+
+    def _kiosk_args(self, exe, path, d, c):
+        """按浏览器类型生成受限启动参数；不支持则返回 None。"""
+        url = self.contest_url
+        if exe == "firefox":
+            # Firefox 无 --app 模式：用 --kiosk 全屏锁定比赛页，并写入
+            # 企业策略文件（distributions/policies.json）禁用退出/多窗口等。
+            try:
+                import json as _json
+                pol_dir = self._firefox_distributions_dir(path)
+                if pol_dir:
+                    os.makedirs(pol_dir, exist_ok=True)
+                    with open(os.path.join(pol_dir, "policies.json"), "w",
+                              encoding="utf-8") as f:
+                        _json.dump({"policies": {
+                            "DisableFeedbackCommands": True,
+                            "DisableFirefoxStudies": True,
+                            "DisableProfileImport": True,
+                            "NoDefaultBookmarks": True,
+                            "OfferToSaveLogins": False,
+                            "OverrideFirstRunPage": url,
+                            "EnableBookmarksInToolbar": False,
+                        }}, f)
+            except OSError:
+                pass
+            return [path, "--kiosk", url]
+        # Chromium 系（Chrome/Edge/Chromium）：--app 无地址栏单窗口模式
+        return [path, "--app=%s" % url, "--new-window", "--start-maximized",
+                "--disable-session-crashed-bubble"]
+
+    @staticmethod
+    def _firefox_distributions_dir(exe_path):
+        """定位 Firefox 安装目录旁的 distribution 目录（企业策略加载点）。"""
+        real = os.path.realpath(exe_path)
+        bindir = os.path.dirname(real)
+        parent = os.path.dirname(bindir)
+        # 可写才尝试（Linux 发行版装的 Firefox 在 /usr/lib 下通常不可写，
+        # 写不进去就跳过策略文件，仅靠 --kiosk + URL 监控兜底）
+        for cand in (os.path.join(parent, "distribution"),
+                     os.path.join(bindir, "browser", "distribution")):
+            if os.access(parent if cand.startswith(parent) else bindir,
+                         os.W_OK):
+                try:
+                    os.makedirs(cand, exist_ok=True)
+                    return cand
+                except OSError:
+                    continue
+        return None
 
     def on_end(self):
         if not messagebox.askyesno("结束考试", "确认结束考试并生成监考报告？"):
@@ -393,18 +445,32 @@ class MonitorApp:
         self._pending = None
 
     def _reclaim_browser(self, browser):
-        exe_map = {"chrome": "chrome", "msedge": "msedge",
-                   "opera": "opera", "brave": "brave"}
+        """越界后把浏览器重新拉回比赛页面（Chrome/Edge/Firefox 均支持）。"""
+        url = self.contest_url
+        if browser == "Firefox":
+            for exe in ("firefox",):
+                path = shutil_which(exe) or shutil_which(exe + ".exe")
+                if path:
+                    try:
+                        subprocess.Popen([path, url],
+                                         stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL)
+                        return
+                    except OSError:
+                        pass
+        exe_map = {"Chrome": "chrome", "Microsoft Edge": "msedge",
+                   "Chromium": "chromium", "Opera": "opera",
+                   "Brave": "brave"}
         exe = exe_map.get(browser)
         if exe and shutil_which(exe):
             try:
-                subprocess.Popen([shutil_which(exe), self.contest_url],
+                subprocess.Popen([shutil_which(exe), url],
                                  stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL)
+                return
             except OSError:
                 pass
-        else:
-            platform_adapter.launch_default_browser(self.contest_url)
+        platform_adapter.launch_default_browser(url)
 
     # ---- 完成 ----
     def _show_report_done(self, paths):

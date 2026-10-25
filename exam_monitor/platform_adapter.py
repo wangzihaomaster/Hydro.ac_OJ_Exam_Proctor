@@ -181,47 +181,102 @@ def kill_process(pid, grace=1.0):
 # 浏览器标签页 URL 读取（尽力而为）
 # --------------------------------------------------------------------------
 
-CHROME_FAMILY = ("chrome", "msedge", "opera", "brave")
+CHROME_FAMILY = ("chrome", "msedge", "edge", "chromium", "opera", "brave")
+
+# 监控的浏览器集合（Chromium 系 + Firefox）
+SUPPORTED_BROWSERS = CHROME_FAMILY + ("firefox",)
 
 
 def _find_profile_dirs(exe_base):
-    """在常见用户数据目录中查找浏览器 profile。"""
+    """在常见用户数据目录中查找浏览器 profile（含 Default / Profile 1 ...）。"""
     home = os.path.expanduser("~")
-    candidates = []
+    root = None
     if IS_WIN:
         appdata = os.environ.get("LOCALAPPDATA", "")
+        local = os.environ.get("LOCALAPPDATA", "")
+        roaming = os.environ.get("APPDATA", "")
         mapping = {
-            "chrome": os.path.join(appdata, "Google", "Chrome", "User Data"),
-            "msedge": os.path.join(appdata, "Microsoft",
-                                   "Edge", "User Data"),
-            "opera":  os.path.join(appdata, "Opera Software",
-                                   "Opera Stable"),
-            "brave":  os.path.join(appdata, "BraveSoftware",
-                                   "Brave-Browser", "User Data"),
+            "chrome":   os.path.join(local, "Google", "Chrome", "User Data"),
+            "msedge":   os.path.join(local, "Microsoft", "Edge",
+                                     "User Data"),
+            "edge":     os.path.join(local, "Microsoft", "Edge",
+                                     "User Data"),
+            "chromium": os.path.join(local, "Chromium", "User Data"),
+            "opera":    os.path.join(local, "Opera Software",
+                                     "Opera Stable"),
+            "brave":    os.path.join(local, "BraveSoftware",
+                                     "Brave-Browser", "User Data"),
+            # Firefox：Local 目录存放 sessionstore*
+            "firefox":  os.path.join(local, "Firefox", "Profiles"),
         }
-        candidates.append(mapping.get(exe_base))
+        if exe_base == "firefox" and not os.path.isdir(
+                mapping["firefox"] or ""):
+            # 某些安装会把 Profiles 放在 Roaming 下
+            mapping["firefox"] = os.path.join(roaming, "Mozilla", "Firefox",
+                                              "Profiles")
+        root = mapping.get(exe_base)
     elif IS_MAC:
         base = os.path.join(home, "Library", "Application Support")
         mapping = {
-            "chrome": os.path.join(base, "Google", "Chrome", "Default"),
-            "msedge": os.path.join(base, "Microsoft Edge", "Default"),
-            "opera":  os.path.join(base, "com.operasoftware.Opera",
-                                   "Default"),
-            "brave":  os.path.join(base, "BraveSoftware",
-                                   "Brave-Browser", "Default"),
+            "chrome":   os.path.join(base, "Google", "Chrome"),
+            "msedge":   os.path.join(base, "Microsoft Edge"),
+            "edge":     os.path.join(base, "Microsoft Edge"),
+            "chromium": os.path.join(base, "Chromium"),
+            "opera":    os.path.join(base, "com.operasoftware.Opera"),
+            "brave":    os.path.join(base, "BraveSoftware",
+                                     "Brave-Browser"),
+            "firefox":  os.path.join(base, "Firefox", "Profiles"),
         }
-        candidates.append(mapping.get(exe_base))
+        root = mapping.get(exe_base)
     else:
         mapping = {
-            "chrome": ".config/google-chrome/Default",
-            "msedge": ".config/microsoft-edge/Default",
-            "opera":  ".config/opera/Default",
-            "brave":  ".config/BraveSoftware/Brave-Browser/Default",
+            "chrome":   ".config/google-chrome",
+            "msedge":   ".config/microsoft-edge",
+            "edge":     ".config/microsoft-edge",
+            "chromium": ".config/chromium",
+            "opera":    ".config/opera",
+            "brave":    ".config/BraveSoftware/Brave-Browser",
+            "firefox":  ".mozilla/firefox",
         }
         rel = mapping.get(exe_base)
         if rel:
-            candidates.append(os.path.join(home, rel))
-    return [c for c in candidates if c and os.path.isdir(c)]
+            root = os.path.join(home, rel)
+    if not root or not os.path.isdir(root):
+        return []
+    found = []
+    if exe_base == "firefox":
+        # profiles.ini 指向的目录优先，其次扫描 *.default* 目录
+        try:
+            import configparser
+            ini = os.path.join(root, "profiles.ini")
+            if os.path.exists(ini):
+                cp = configparser.ConfigParser()
+                cp.read(ini, encoding="utf-8")
+                for sec in cp.sections():
+                    rp = cp[sec].get("Path")
+                    if rp:
+                        pd = os.path.normpath(os.path.join(root, rp))
+                        if os.path.isdir(pd):
+                            found.append(pd)
+        except Exception:
+            pass
+        # <Profiles>/<随机>.default(-release)/
+        for d in sorted(os.listdir(root)):
+            pd = os.path.join(root, d)
+            if os.path.isdir(pd) and (d.endswith(".default")
+                                      or ".default" in d):
+                if pd not in found:
+                    found.append(pd)
+    else:
+        # User Data/<Default|Profile 1|...>，Opera 等直接就是根目录
+        for d in sorted(os.listdir(root)):
+            pd = os.path.join(root, d)
+            if os.path.isdir(pd) and (d == "Default"
+                                      or d.startswith("Profile ")):
+                found.append(pd)
+        if not found and os.path.isdir(os.path.join(root, "Sessions")):
+            found.append(root)
+    return found
 
 
 def _read_session_urls(profile_dir):
@@ -249,55 +304,197 @@ def _read_session_urls(profile_dir):
     return urls
 
 
+def _read_sessionstore_urls(pd):
+    """解析 Firefox profile 的 sessionstore*，返回当前打开标签页 URL。
+
+    支持三种格式：
+      1. sessionstore.jsonlz4 —— Mozilla LZ4 帧格式（'LZ4' 魔数 + 8 字节头，
+         之后为 lz4.block，首 4 字节小端存原始长度）；
+      2. recovery/junrecovery/sessionstore.js —— 旧版明文 JSON；
+      3. backup/*.jsonlz4 —— 上一次会话备份（兜底）。
+    优先按 windows[].tabs[].entries[] 结构化提取当前 URL（取每个标签最新
+    history 条目）；结构解析失败时退回正则全文扫描。
+    """
+    import json
+
+    def _decompress_jsonlz4(path):
+        """Mozilla LZ4 帧格式：'LZ4'+描述符(1)+保留(4)=8 字节头，
+        之后是 lz4.block 数据（首 4 字节小端为原始长度）。"""
+        with open(path, "rb") as f:
+            data = f.read()
+        if not data.startswith(b"LZ4"):
+            return None
+        body = data[8:]
+        try:
+            import lz4.block
+            dec = None
+            try:
+                # 优先按"内嵌长度"模式整体解压
+                dec = lz4.block.decompress(body)
+            except Exception:
+                raw_len = int.from_bytes(body[:4], "little")
+                dec = lz4.block.decompress(body[4:],
+                                           uncompressed_size=raw_len)
+            return json.loads(dec.decode("utf-8", "replace"))
+        except Exception:
+            return None
+
+    def _urls_from_obj(obj):
+        urls = []
+        try:
+            for win in obj.get("windows", []) or []:
+                for tab in win.get("tabs", []) or []:
+                    entries = tab.get("entries", []) or []
+                    if not entries:
+                        continue
+                    # last entry = 当前正在显示的页面
+                    for e in entries[-1:]:
+                        u = e.get("url", "")
+                        if u.startswith(("http://", "https://")):
+                            urls.append(u)
+                # 其它历史条目也收集，便于事后核查（导航过哪里）
+                for tab in win.get("tabs", []) or []:
+                    for e in tab.get("entries", []) or [][:-1]:
+                        u = e.get("url", "")
+                        if u.startswith(("http://", "https://")):
+                            urls.append(u)
+        except Exception:
+            return None
+        return urls
+
+    candidates = []
+    for fn in ("sessionstore.jsonlz4", "sessionstore.js",
+               "sessionstore-backups/recovery.jsonlz4",
+               "sessionstore-backups/recovery.json",
+               "sessionstore-backups/junrecovery.jsonlz4",
+               "sessionstore-backups/upgrade.jsonlz4"):
+        p = os.path.join(pd, fn)
+        if os.path.exists(p):
+            candidates.append(p)
+    urls = []
+    for p in candidates:
+        got = None
+        if p.endswith(".jsonlz4"):
+            obj = _decompress_jsonlz4(p)
+            if obj is not None:
+                got = _urls_from_obj(obj)
+                if got is None:
+                    got = _regex_urls_in_text(open(p, "rb").read())
+        else:
+            try:
+                with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                    obj = json.load(f)
+                got = _urls_from_obj(obj)
+            except Exception:
+                got = _regex_urls_in_text(open(p, "rb").read())
+        if got:
+            urls.extend(got)
+    return urls
+
+
+_URL_RE_BYTES = re.compile(
+    b"https?://[^" + bytes(range(0x21)) + b"\"'<>\\\\\x7f]{4,}")
+
+
+def _regex_urls_in_text(data_bytes):
+    out = []
+    for m in _URL_RE_BYTES.finditer(data_bytes):
+        try:
+            out.append(m.group(0).decode("utf-8", "ignore"))
+        except Exception:
+            continue
+    return out
+
+
 def get_browser_open_urls():
-    """返回 {浏览器名: [url,...]} ，读不到则返回空 dict。"""
+    """返回 {浏览器名: {"current": [...], "history": [...]}} ，读不到则空 dict。
+
+    current 为尽力判断的"当前显示页面"（Chromium 系取自 Session/Tabs 快照中
+    最后写入的条目及前台窗口标题；Firefox 取自 sessionstore 每个标签的最新
+    history 条目）；history 为快照里出现过的全部 URL，供事后核查。
+    """
     result = {}
-    seen_names = set()
+    running = set()
     for pid, name in iter_processes():
         base = name.replace(".exe", "")
-        if base in CHROME_FAMILY and base not in seen_names:
-            seen_names.add(base)
-            urls = []
-            for prof in _find_profile_dirs(base):
-                urls.extend(_read_session_urls(prof))
-            if urls:
-                result[base] = sorted(set(urls))
-    # Firefox：走 remote (about:debugging 未开启时不可用) -> 读 places/session
-    if "firefox" in seen_names or any(n == "firefox" for _, n in
-                                      iter_processes()):
-        home = os.path.expanduser("~")
-        ff_root = None
-        if IS_WIN:
-            ff_root = os.path.join(
-                os.environ.get("APPDATA", ""), "Mozilla", "Firefox",
-                "Profiles")
-        elif IS_MAC:
-            ff_root = os.path.join(
-                home, "Library", "Application Support", "Firefox", "Profiles")
-        else:
-            ff_root = os.path.join(home, ".mozilla", "firefox", "Profiles")
-        if ff_root and os.path.isdir(ff_root):
-            for prof in os.listdir(ff_root):
-                pd = os.path.join(ff_root, prof)
-                jsonf = os.path.join(pd, "sessionstore.jsonlz4")
-                legacy = os.path.join(pd, "sessionstore.js")
-                target = jsonf if os.path.exists(jsonf) else \
-                    (legacy if os.path.exists(legacy) else None)
-                if not target:
-                    continue
-                try:
-                    with open(target, "rb") as f:
-                        data = f.read()
-                    urls = []
-                    for m in re.finditer(
-                            rb"https?://[^\x00\x01-\x1f\"'<>\\ ]{4,}", data):
-                        urls.append(m.group(0).decode("utf-8", "ignore"))
-                    if urls:
-                        result.setdefault("firefox", []).extend(
-                            sorted(set(urls)))
-                except OSError:
-                    pass
+        if base == "edge":
+            base = "msedge"
+        if base in SUPPORTED_BROWSERS:
+            running.add(base)
+    if not running:
+        return result
+
+    # Chromium 系：Session/Tabs 快照
+    for base in sorted(running):
+        if base == "firefox":
+            continue
+        urls = []
+        for prof in _find_profile_dirs(base):
+            urls.extend(_read_session_urls(prof))
+        if urls:
+            disp = _display_name(base)
+            result[disp] = {"current": _guess_current(urls),
+                            "history": sorted(set(urls))}
+
+    # Firefox：sessionstore.jsonlz4（结构化解析，含正则兜底）
+    if "firefox" in running:
+        urls = []
+        for pd in _find_profile_dirs("firefox"):
+            urls.extend(_read_sessionstore_urls(pd))
+        if urls:
+            result["Firefox"] = {"current": _guess_current(urls),
+                                 "history": sorted(set(urls))}
+
+    # 兜底增强：从可见窗口标题中提取 URL（Chrome/Edge/Firefox 均适用）
+    titles = []
+    try:
+        for _, t in list_visible_windows():
+            if t:
+                titles.append(t)
+    except Exception:
+        pass
+    for t in titles:
+        for u in _regex_urls_in_text(t.encode("utf-8", "ignore")):
+            disp = _browser_of_title(t)
+            if disp:
+                ent = result.setdefault(disp, {"current": [], "history": []})
+                if u not in ent["current"]:
+                    ent["current"].append(u)
     return result
+
+
+_BROWSER_DISPLAY = {
+    "chrome": "Chrome", "msedge": "Microsoft Edge", "chromium": "Chromium",
+    "opera": "Opera", "brave": "Brave", "firefox": "Firefox",
+}
+
+
+def _display_name(base):
+    return _BROWSER_DISPLAY.get(base, base)
+
+
+def _browser_of_title(title):
+    tl = title.lower()
+    if "mozilla firefox" in tl or " - firefox" in tl:
+        return "Firefox"
+    if "microsoft edge" in tl or " - edge" in tl or "inprivate - microsoft" \
+            in tl:
+        return "Microsoft Edge"
+    if "google chrome" in tl or " - google chrome" in tl:
+        return "Chrome"
+    if " - chromium" in tl or "chromium" in tl:
+        return "Chromium"
+    if "- opera" in tl:
+        return "Opera"
+    if "- brave" in tl:
+        return "Brave"
+    return None
+
+
+def _guess_current(urls):
+    """快照文件里无法精确区分当前页，把 hydro.ac 相关 URL 视为当前重点，
+    其余全部保留在 history 中由 UrlMonitor 一并核查。"""
+    return sorted(set(urls))
 
 
 # --------------------------------------------------------------------------

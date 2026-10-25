@@ -86,43 +86,34 @@ class ScreenRecorder:
                                             daemon=True)
             self._thread.start()
 
-    @staticmethod
-    def _grab_backend():
-        """按平台选择 ffmpeg 抓屏输入。"""
-        if IS_WIN:
-            return ["-f", "gdigrab", "-framerate", None, "-i", "desktop"]
-        if sys.platform == "darwin":
-            return ["-f", "avfoundation", "-i", "1:none"]
-        return ["-f", "x11grab", "-framerate", None, "-i", None]
-
     def _start_ffmpeg(self):
-        import os as _os
-        self._grab_backend = "x11grab"
-        backend = ScreenRecorder._pick_backend()
+        backend = self._pick_backend()
         self._grab_backend = backend[0]
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"] + backend[1] + [
-            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-            self.video_path,
-        ]
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"] \
+            + backend[1] + [
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-c:v", "libx264", "-preset", "ultrafast",
+                "-pix_fmt", "yuv420p", self.video_path,
+            ]
         self._ffmpeg_proc = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    @staticmethod
-    def _pick_backend():
+    def _pick_backend(self):
         """返回 (名称, 参数列表)；探测不到可用抓屏设备则抛异常。"""
+        fps = str(max(1, int(round(self.fps))) or 1)
         plat = sys.platform
         if plat.startswith("win"):
-            return ("gdigrab", ["-f", "gdigrab", "-framerate",
-                                str(SCREEN_FPS_SAFE), "-i", "desktop"])
+            return ("gdigrab", ["-f", "gdigrab", "-framerate", fps,
+                                 "-i", "desktop"])
         if plat == "darwin":
             return ("avfoundation", ["-f", "avfoundation",
-                                     "-framerate", str(SCREEN_FPS_SAFE),
-                                     "-i", "1:none"])
+                                     "-framerate", fps, "-i", "1:none"])
         disp = os.environ.get("DISPLAY", ":0")
+        size = _screen_size_x11(disp)
+        if not size:
+            raise RuntimeError("无法获取 X11 屏幕尺寸(xrandr)")
         return ("x11grab", ["-f", "x11grab", "-video_size",
-                            _x11_size(disp), "-framerate",
-                            str(SCREEN_FPS_SAFE), "-i", disp])
+                            "%dx%d" % size, "-framerate", fps, "-i", disp])
 
     # ------------------------------------------------------------------
     def _mss_loop(self):

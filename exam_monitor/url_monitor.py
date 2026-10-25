@@ -84,8 +84,14 @@ class UrlMonitor(threading.Thread):
 
     def _scan_once(self):
         opened = platform_adapter.get_browser_open_urls()
-        for browser, urls in opened.items():
-            for u in urls:
+        for browser, ent in opened.items():
+            urls = set()
+            if isinstance(ent, dict):      # {"current": [...], "history": [...]}
+                urls.update(ent.get("current", []))
+                urls.update(ent.get("history", []))
+            else:                          # 兼容旧的 list 结构
+                urls.update(ent)
+            for u in sorted(urls):
                 ok, reason = is_url_allowed(u, self.domain, self.cid)
                 if ok:
                     continue

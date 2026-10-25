@@ -6,7 +6,10 @@
 """
 
 import getpass
+import os
 import platform
+import shutil as _sh
+import subprocess
 import time
 
 from . import config, platform_adapter, report
@@ -14,6 +17,32 @@ from .app_monitor import AppMonitor
 from .events import EventLog
 from .recorder import ScreenRecorder
 from .url_monitor import UrlMonitor
+
+
+def _launch_browser_limited(contest_url, log):
+    """CLI 模式：优先用受限方式启动 Chrome/Edge(--app) / Firefox(--kiosk)。"""
+    for exe in ("chrome", "msedge", "google-chrome", "chromium",
+                "microsoft-edge", "firefox"):
+        path = _sh.which(exe) or _sh.which(exe + ".exe")
+        if not path:
+            continue
+        try:
+            if exe == "firefox":
+                args = [path, "--kiosk", contest_url]
+                mode = "--kiosk 全屏锁定"
+            else:
+                args = [path, "--app=%s" % contest_url, "--new-window"]
+                mode = "--app 无地址栏"
+            subprocess.Popen(args, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            log.record("browser_launch",
+                       "已以 %s 模式启动 %s -> %s" % (mode, exe, contest_url))
+            return True
+        except OSError:
+            continue
+    platform_adapter.launch_default_browser(contest_url)
+    log.record("browser_launch", "已打开默认浏览器 -> %s" % contest_url)
+    return False
 
 
 def _ask_close(info):
@@ -74,14 +103,13 @@ def cli_main(domain, cid, minutes, out_base, auto_close=False):
         log.violation("url_violation",
                       "浏览器(%s)访问非比赛页面: %s" % (browser, url),
                       {"reason": reason})
-        platform_adapter.launch_default_browser(contest_url)
+        _launch_browser_limited(contest_url, log)
         log.record("url_block", "已把 %s 重置回比赛页面" % browser, ack="auto")
 
     url_mon = UrlMonitor(contest_url, domain, cid, on_url_violation)
     url_mon.start()
 
-    platform_adapter.launch_default_browser(contest_url)
-    log.record("browser_launch", "已打开默认浏览器 -> %s" % contest_url)
+    _launch_browser_limited(contest_url, log)
 
     print("\n监考中… %.1f 分钟（Ctrl+C 可提前结束）\n" % minutes)
     t_end = time.time() + minutes * 60
