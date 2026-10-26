@@ -14,6 +14,31 @@
      （可写时生效）；
    - 后台轮询读取浏览器打开的 URL，越界即记录违规并重新拉回比赛页。
 
+## 单文件免安装版（最简单，推荐）
+
+`HydroExamMonitor-onefile.py` 是一个自包含的 Python 脚本（约 130KB），
+内嵌了全部模块源码，**无需下载/解压/安装任何东西**：
+
+```bash
+python HydroExamMonitor-onefile.py            # Windows 双击或命令行运行，GUI 优先
+python HydroExamMonitor-onefile.py --cli --domain 域 --cid 比赛id --minutes 120
+```
+
+要求仅为电脑装有 Python 3.7+（tkinter 随官方安装包自带）。
+重新生成：`python oneliner/build_onefile.py`。
+
+## 本地重建安装包（Setup.exe）
+
+1. 把本仓库（或 `HydroExamMonitor-source.zip` 解压）拷到任意一台能上网的电脑；
+2. 下载嵌入式 Python：https://www.python.org/ftp/python/3.12.7/python-3.12.7-embed-amd64.zip
+   保存为仓库根目录 `python-embed.zip`（若已存在则跳过）；
+3. Windows：双击 `一键出安装包.bat`；或跨平台命令行：
+   ```bash
+   python make_installer.py --embed-zip python-embed.zip
+   ```
+4. 产物在 `dist/HydroExamMonitor-Setup.exe`（以及绿色包 `HydroExamMonitor-Windows.zip`），
+   发给考生机双击安装即可，目标机无需 Python、无需联网。
+
 ## 安装包（推荐·免环境）
 
 考生电脑**什么都不用装**：把 `dist/HydroExamMonitor-Setup.exe` 拷给考生，双击→自动安装到 `%LOCALAPPDATA%\HydroExamMonitor`→创建桌面快捷方式并启动。
