@@ -1,0 +1,67 @@
+{
+  "meta": {
+    "app": "Hydro 监考系统",
+    "version": "1.0.0",
+    "domain": "demo",
+    "cid": "c1",
+    "contest_url": "https://hydro.ac/d/demo/contest/c1",
+    "start_time": "2026-10-26 08:14:32",
+    "end_time": "2026-10-26 08:14:44",
+    "duration": 12.111165523529053,
+    "user": "root",
+    "host": "c-6adf0b96-015982b3-eccdf1b69a66",
+    "system": "Linux 4.19.91-c8dfc93.al7.x86_64",
+    "video": "exam_records/c1_20261026_081432/screen.mp4",
+    "frames_zip": "exam_records/c1_20261026_081432/frames.zip",
+    "record_method": "pillow-frames",
+    "video_frames": 13
+  },
+  "generated_at": "2026-10-26 08:14:44",
+  "events": [
+    {
+      "time": "2026-10-26 08:14:32",
+      "ts": 1793002472.6047626,
+      "kind": "session_start",
+      "message": "考试开始：https://hydro.ac/d/demo/contest/c1",
+      "detail": {
+        "domain": "demo",
+        "cid": "c1"
+      },
+      "ack": ""
+    },
+    {
+      "time": "2026-10-26 08:14:32",
+      "ts": 1793002472.655937,
+      "kind": "video",
+      "message": "录屏已启动 (pillow-frames)",
+      "detail": {},
+      "ack": ""
+    },
+    {
+      "time": "2026-10-26 08:14:32",
+      "ts": 1793002472.7070541,
+      "kind": "browser_launch",
+      "message": "已打开默认浏览器 -> https://hydro.ac/d/demo/contest/c1",
+      "detail": {},
+      "ack": ""
+    },
+    {
+      "time": "2026-10-26 08:14:44",
+      "ts": 1793002484.7159283,
+      "kind": "video",
+      "message": "录屏已停止",
+      "detail": {
+        "seconds": 12
+      },
+      "ack": ""
+    },
+    {
+      "time": "2026-10-26 08:14:44",
+      "ts": 1793002484.7160246,
+      "kind": "session_end",
+      "message": "考试结束",
+      "detail": {},
+      "ack": ""
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+[2026-10-25 22:51:16] session_start    考试开始：https://hydro.ac/d/demo/contest/d1
+[2026-10-25 22:51:16] video            录屏已启动 (pillow-frames)
+[2026-10-25 22:51:16] browser_launch   已打开默认浏览器 -> https://hydro.ac/d/demo/contest/d1
+[2026-10-25 22:52:16] video            录屏已停止
+[2026-10-25 22:52:16] session_end      考试结束
